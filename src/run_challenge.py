@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 full_path = os.path.abspath(__file__)
 SRC_PATH=os.path.dirname(full_path)+"/"
 
-def submit_on_chain_request_for_pol_challenge(
+def submit_on_chain_request_for_challenge(
+                                          proof_type,
                                           account, 
                                           chain_config, 
                                           proof_config, 
@@ -36,8 +37,8 @@ def submit_on_chain_request_for_pol_challenge(
                                           is_ip_v6, 
                                           challengers_count, 
                                           tolerance, 
-                                          latitude, 
-                                          longitude
+                                          claim1,
+                                          claim2
                                         ):
     
     connection_to_rpc = connect_to_rpc(chain_config["rpc_url"])
@@ -45,18 +46,39 @@ def submit_on_chain_request_for_pol_challenge(
     if not connection_to_rpc:
         logger.error(f"Unable to connect to {chain_config['rpc_url']}")
 
-    challenge_info = eth_abi.encode (
-        ["address","address","bool","uint256","uint256","int256","int256"],
+    challenge_info = None
+    if proof_type == "pob":
+        challenge_info = eth_abi.encode (
+            ["address","address","uint8","bool","uint256","uint256","uint256","int256"],
+            [
+                chain_config["prover_registry"]["proxy"], 
+                prover,
+                0,
+                is_ip_v6,
+                challengers_count if challengers_count else proof_config["number_challengers_default"],
+                claim1,
+                claim2,
+                tolerance if tolerance else proof_config["challengers_tolerance_default"],
+            ]
+        )
+    else:
+        challenge_info = eth_abi.encode (
+            ["address","address","bool","uint256","uint256","int256","int256"],
         [
             chain_config["prover_registry"]["proxy"], 
             prover,
             is_ip_v6,
             challengers_count if challengers_count else proof_config["number_challengers_default"],
             tolerance if tolerance else proof_config["challengers_tolerance_default"],
-            latitude,
-            longitude
+            claim1,
+            claim2
         ]
     )
+
+    logger.info(f'Challenge info: {challenge_info}')
+    # Challenge info as HEX string
+    challenge_info_hex = challenge_info.hex()
+    logger.info(f'Challenge info as HEX: {challenge_info_hex}')
 
     receipt,contract = submit_transaction(  
                                             chain_config["chain_id"], 
@@ -122,20 +144,33 @@ def process_prover( proof_type,
     try:
         prover_id = prover["id"].split("/")[1]
         is_ipv6 = prover["id"].split("/")[0] == "IPv6"
-        
-        if not (proof_type == 'pol' and 
-                should_run_for_prover(prover, prover_id, project_name, prover_to_challenge) and 
-                is_alive_yet(prover["last_alive"], last_alive)):
+        should_run = should_run_for_prover(prover, prover_id, project_name, prover_to_challenge)
+        is_alive = is_alive_yet(prover["last_alive"], last_alive)
+
+        if not should_run or not is_alive:
             logger.info(f'Skipping challenge for Prover: {prover["id"]} from {prover["projectName"].lower()}. Last alive at {prover["last_alive"]}')
             return
 
-        latitude = int(prover["claims"]["latitude"] * 10**18)
-        longitude = int(prover["claims"]["longitude"] * 10**18)
+        logger.info(f'Challenging Prover: {prover["id"]} from {prover["projectName"].lower()}. Last alive at {prover["last_alive"]}')
+
+        logger.info(f'Claims: {prover["claims"]}')
+
+        claim1 = 0
+        claim2 = 0
+        if proof_type == "pob":
+            claim1 = int(prover["claims"]["downlink_bandwidth"])
+            claim2 = int(prover["claims"]["uplink_bandwidth"])
+        else:
+            claim1 = int(prover["claims"]["latitude"] * 10**18)
+            claim2 = int(prover["claims"]["longitude"] * 10**18)
+
         
-        request_id, challenges = submit_on_chain_request_for_pol_challenge(
-            account, chain_config, proof_config, prover_id, is_ipv6,
-            challenger_count, tolerance_count, latitude, longitude
+        request_id, challenges = submit_on_chain_request_for_challenge(
+            proof_type, account, chain_config, proof_config, prover_id, is_ipv6,
+            challenger_count, tolerance_count, claim1, claim2
         )
+
+        logger.info(f'Challenges: {challenges}')
 
         for challenge in filter(None, challenges):
             logger.info(f'Triggering challenge for Prover: {prover["id"]} last alive at {prover["last_alive"]} with challenge_id: {challenge} and on-chain Request ID: {request_id}')
@@ -148,6 +183,7 @@ def process_prover( proof_type,
 
 def main(config_file, proof_type,private_key,prover_to_challenge,challenger_count=1,tolerance_count=0,project_name='' ):
 
+
     config = Config(config_file)
         
     api_config = config.get_api_config()
@@ -158,6 +194,7 @@ def main(config_file, proof_type,private_key,prover_to_challenge,challenger_coun
     poll_seconds = api_config["poll_seconds"]
     LAST_ALIVE = proof_config["alive_check_minutes"]
 
+    logger.info(f'PROOF CONFIG: {proof_config}')
 
     validate_inputs(proof_config)
     
